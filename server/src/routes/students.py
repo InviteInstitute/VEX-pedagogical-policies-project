@@ -8,18 +8,26 @@ from src.block_catalog import resolve_available_blocks
 from src.current_state_metrics import (
     build_raw_logs_context,
     compute_snapshot_for_student_session,
+    extract_current_stage,
     fetch_events_from_db,
     has_active_project_run,
     select_current_playground_segment,
 )
 from src.db import (
+    get_conn,
     get_latest_session_id_for_student,
     get_message_id_for_response,
     insert_message,
     insert_message_feedback,
 )
+from src.background_catalogue import resolve_background_description
+from src.stage_catalogue import resolve_stage_description
 from src.feedback_policy import FeedbackClass, determine_feedback_class
-from src.llm_service import generate_main_llm_response, generate_robot_behavior_summary
+from src.llm_service import (
+    generate_main_llm_response,
+    generate_no_runs_llm_response,
+    generate_robot_behavior_summary,
+)
 from src.log_sync import sync_invite_hub_logs
 from src.schemas import (
     FeedbackRequest,
@@ -44,6 +52,9 @@ ACTIVE_RUN_MESSAGE = (
 )
 WRONG_PLAYGROUND_MESSAGE = (
     "You are on the wrong playground right now. Switch to GO-Mars, then ask for help again."
+)
+NO_RUNS_MESSAGE = (
+    "Please run your code once first to get more help."
 )
 _latest_session_cache: dict[str, tuple[str, float]] = {}
 _last_sync_at: dict[str, float] = {}
@@ -98,13 +109,9 @@ def resolve_session_id_for_student(student_id: str) -> str:
 
 
 def resolve_session_id_with_sync(student_id: str) -> tuple[str, int]:
-    try:
-        return resolve_session_id_for_student(student_id), 0
-    except HTTPException as error:
-        if error.status_code != 404:
-            raise
     synced_log_count = maybe_sync_invite_hub_logs(student_id)
     return resolve_session_id_for_student(student_id), synced_log_count
+
 
 
 @router.get("/students/{student_id}/session", response_model=SessionResolutionResponse)
@@ -150,11 +157,18 @@ def create_message(student_id: str, payload: MessageRequest) -> MessageResponse:
         role="student",
         content=student_message_text,
     )
+    events = fetch_events_from_db(student_id=student_id, session_id=resolved_session_id)
+    current_stage = extract_current_stage(events) if events else None
+    if current_stage is None and resolved_playground == "GO-Mars":
+        current_stage = 1
+
     insert_message(
         session_id=session_uuid,
         student_id=student_id,
         role="student",
         message_text=student_message_text,
+        playground=resolved_playground,
+        stage=current_stage,
     )
     log_stage(
         "Student Message Received",
@@ -183,6 +197,7 @@ def create_response(
     response_id = uuid4()
     resolved_session_id = payload.session_id
     resolved_playground = payload.playground or DEFAULT_PLAYGROUND
+    current_stage = None
     llm_request = None
     response_text = payload.response_text
     feedback_classes = set()
@@ -192,6 +207,7 @@ def create_response(
     raw_logs = "None"
     robot_behavior_summary = "None"
     recent_messages: list[dict[str, str]] = []
+    attempts = None
 
     # Refresh event logs
     sync_invite_hub_logs(student_id=student_id)
@@ -206,119 +222,179 @@ def create_response(
                 student_id=student_id,
                 session_id=resolved_session_id,
             )
+            current_stage = extract_current_stage(events)
             #debug
             # for event in events[-10:]:
             #     print(f"students.py l 207: Event ID: {event.id}, Type: {event.event_type}, Playground: {event.playground}, Timestamp: {event.event_ts.isoformat()}")
 
-            current_playground, _ = select_current_playground_segment(events)
-            if current_playground != DEFAULT_PLAYGROUND:
-                response_text = WRONG_PLAYGROUND_MESSAGE
+            attempts = sum(
+                1 for event in events
+                if event.event_type == "runProject" and event.playground == resolved_playground
+            )
+            if attempts == 0:
                 log_stage(
-                    "Wrong Playground Detected",
+                    "No Project Runs Detected",
                     student_id=student_id,
                     session_id=resolved_session_id,
                     synced_log_count=synced_log_count,
-                    current_playground=current_playground,
-                    expected_playground=DEFAULT_PLAYGROUND,
-                    message=response_text,
-                )
-            elif has_active_project_run(events):
-                response_text = ACTIVE_RUN_MESSAGE
-                log_stage(
-                    "Active Run Detected",
-                    student_id=student_id,
-                    session_id=resolved_session_id,
-                    synced_log_count=synced_log_count,
-                    message=response_text,
+                    attempts=attempts,
                 )
             else:
-                snapshot = compute_snapshot_for_student_session(
-                    student_id=student_id,
-                    session_id=resolved_session_id,
-                    insert=True,
-                )
+                current_playground, _ = select_current_playground_segment(events)
+                if current_playground != DEFAULT_PLAYGROUND:
+                    response_text = WRONG_PLAYGROUND_MESSAGE
+                    log_stage(
+                        "Wrong Playground Detected",
+                        student_id=student_id,
+                        session_id=resolved_session_id,
+                        synced_log_count=synced_log_count,
+                        current_playground=current_playground,
+                        expected_playground=DEFAULT_PLAYGROUND,
+                        attempts=attempts,
+                        message=response_text,
+                    )
+                elif has_active_project_run(events):
+                    response_text = ACTIVE_RUN_MESSAGE
+                    log_stage(
+                        "Active Run Detected",
+                        student_id=student_id,
+                        session_id=resolved_session_id,
+                        synced_log_count=synced_log_count,
+                        attempts=attempts,
+                        message=response_text,
+                    )
+                else:
+                    snapshot = compute_snapshot_for_student_session(
+                        student_id=student_id,
+                        session_id=resolved_session_id,
+                        insert=True,
+                    )
         except Exception as error:
             raise HTTPException(
                 status_code=500,
                 detail=f"Current state analysis failed: {error}",
             ) from error
-        if response_text is None:
-            log_stage(
-                "Current State Analyzer Output",
-                student_id=student_id,
-                session_id=resolved_session_id,
-                synced_log_count=synced_log_count,
-                snapshot=snapshot.to_dict(),
-            )
-            feedback_classes = determine_feedback_class(snapshot)
-            if not feedback_classes:
-                feedback_classes = {FeedbackClass.QUESTION}
-            raw_logs = build_raw_logs_context(
-                student_id=student_id,
-                session_id=resolved_session_id,
-            )
-            recent_messages = get_recent_session_messages(
-                student_id,
-                resolved_playground,
-                resolved_session_id,
-            )
-            log_stage(
-                "Feedback Policy Output",
-                student_id=student_id,
-                session_id=resolved_session_id,
-                synced_log_count=synced_log_count,
-                feedback_classes=sorted(
-                    feedback_class.value for feedback_class in feedback_classes
-                ),
-            )
 
-    if task and payload.student_message and feedback_classes:
-        try:
-            robot_behavior_request = generate_robot_behavior_summary(
-                task=task,
-                raw_logs=raw_logs,
-            )
-            robot_behavior_summary = robot_behavior_request["response_text"]
-            log_stage(
-                "Robot Behavior Prompt Sent",
-                student_id=student_id,
-                session_id=resolved_session_id,
-                model=robot_behavior_request["model"],
-                prompt=robot_behavior_request["prompt"],
-            )
-            log_stage(
-                "Robot Behavior Output",
-                student_id=student_id,
-                session_id=resolved_session_id,
-                behavior_summary=robot_behavior_summary,
-            )
-            log_stage(
-                "LLM Request Starting",
-                student_id=student_id,
-                session_id=resolved_session_id,
-                model=robot_behavior_request["model"],
-                feedback_classes=sorted(
-                    feedback_class.value for feedback_class in feedback_classes
-                ),
-            )
-            llm_request = generate_main_llm_response(
-                task=task,
-                student_message=payload.student_message,
-                available_blocks=available_blocks,
-                robot_behavior_summary=robot_behavior_summary,
-                recent_messages=recent_messages,
-                feedback_classes=feedback_classes,
-            )
-            log_stage(
-                "LLM Prompt Sent",
-                student_id=student_id,
-                session_id=resolved_session_id,
-                model=llm_request["model"],
-                prompt=llm_request["prompt"],
-            )
-            response_text = llm_request["response_text"]
-        except Exception as error:
-            raise HTTPException(status_code=500, detail=str(error)) from error
+        if current_stage is None and resolved_playground == "GO-Mars":
+            current_stage = 1
+        stage_desc = resolve_stage_description(resolved_playground, current_stage)
+        current_stage_text = f"Stage {current_stage}: {stage_desc}" if current_stage is not None else "Unknown"
+        background_info = resolve_background_description(resolved_playground, current_stage)
+
+        if response_text is None:
+            if attempts > 0:
+                log_stage(
+                    "Current State Analyzer Output",
+                    student_id=student_id,
+                    session_id=resolved_session_id,
+                    synced_log_count=synced_log_count,
+                    attempts=attempts,
+                    snapshot=snapshot.to_dict(),
+                )
+                feedback_classes = determine_feedback_class(snapshot, attempts=attempts)
+                if not feedback_classes:
+                    feedback_classes = {FeedbackClass.QUESTION}
+                raw_logs = build_raw_logs_context(
+                    student_id=student_id,
+                    session_id=resolved_session_id,
+                )
+                recent_messages = get_recent_session_messages(
+                    student_id,
+                    resolved_playground,
+                    resolved_session_id,
+                )
+                log_stage(
+                    "Feedback Policy Output",
+                    student_id=student_id,
+                    session_id=resolved_session_id,
+                    synced_log_count=synced_log_count,
+                    attempts=attempts,
+                    feedback_classes=sorted(
+                        feedback_class.value for feedback_class in feedback_classes
+                    ),
+                )
+            else:
+                recent_messages = get_recent_session_messages(
+                    student_id,
+                    resolved_playground,
+                    resolved_session_id,
+                )
+
+    if task and payload.student_message:
+        if attempts == 0:
+            try:
+                log_stage(
+                    "LLM Request Starting (Zero Runs)",
+                    student_id=student_id,
+                    session_id=resolved_session_id,
+                )
+                llm_request = generate_no_runs_llm_response(
+                    current_stage=current_stage_text,
+                    student_message=payload.student_message,
+                    available_blocks=available_blocks,
+                    recent_messages=recent_messages,
+                    background_info=background_info,
+                    no_runs_message=NO_RUNS_MESSAGE,
+                )
+                log_stage(
+                    "LLM Prompt Sent (Zero Runs)",
+                    student_id=student_id,
+                    session_id=resolved_session_id,
+                    model=llm_request["model"],
+                    prompt=llm_request["prompt"],
+                )
+                response_text = llm_request["response_text"]
+            except Exception as error:
+                raise HTTPException(status_code=500, detail=str(error)) from error
+        elif feedback_classes:
+            try:
+                robot_behavior_request = generate_robot_behavior_summary(
+                    background_info=background_info,
+                    current_stage=current_stage_text,
+                    raw_logs=raw_logs,
+                )
+                robot_behavior_summary = robot_behavior_request["response_text"]
+                log_stage(
+                    "Robot Behavior Prompt Sent",
+                    student_id=student_id,
+                    session_id=resolved_session_id,
+                    model=robot_behavior_request["model"],
+                    prompt=robot_behavior_request["prompt"],
+                )
+                log_stage(
+                    "Robot Behavior Output",
+                    student_id=student_id,
+                    session_id=resolved_session_id,
+                    behavior_summary=robot_behavior_summary,
+                )
+                log_stage(
+                    "LLM Request Starting",
+                    student_id=student_id,
+                    session_id=resolved_session_id,
+                    model=robot_behavior_request["model"],
+                    feedback_classes=sorted(
+                        feedback_class.value for feedback_class in feedback_classes
+                    ),
+                )
+                llm_request = generate_main_llm_response(
+                    current_stage=current_stage_text,
+                    student_message=payload.student_message,
+                    available_blocks=available_blocks,
+                    robot_behavior_summary=robot_behavior_summary,
+                    recent_messages=recent_messages,
+                    feedback_classes=feedback_classes,
+                    background_info=background_info,
+                )
+                log_stage(
+                    "LLM Prompt Sent",
+                    student_id=student_id,
+                    session_id=resolved_session_id,
+                    model=llm_request["model"],
+                    prompt=llm_request["prompt"],
+                )
+                response_text = llm_request["response_text"]
+            except Exception as error:
+                raise HTTPException(status_code=500, detail=str(error)) from error
     elif not response_text:
         raise HTTPException(
             status_code=400,
@@ -342,18 +418,21 @@ def create_response(
         student_id=student_id,
         role="assistant",
         message_text=response_text,
+        playground=resolved_playground,
         feedback_class=", ".join(
             sorted(feedback_class.value for feedback_class in feedback_classes)
         )
         if feedback_classes
         else None,
         response_id=response_id,
+        stage=current_stage,
     )
     log_stage(
         "Assistant Response Sent",
         student_id=student_id,
         session_id=resolved_session_id,
         response_id=str(response_id),
+        attempts=attempts,
         message=response_text,
     )
 

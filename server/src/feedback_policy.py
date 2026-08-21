@@ -32,65 +32,82 @@ class FeedbackClass(Enum):
     REPEAT = "Repeat"
     NEXT_STEP = "Next Step"
 
-def determine_feedback_class(snapshot: CurrentStateSnapshot) -> set[FeedbackClass]:
+def determine_feedback_class(snapshot: CurrentStateSnapshot, attempts: int = 1) -> set[FeedbackClass]:
     feedback_classes = set()
-    cognition = snapshot.cognition.value
+    # cognition = snapshot.cognition.value
     persistence = snapshot.persistence.value
 
-    # Long-term stalled progress -> Help out -> c.i
-    if cognition == "LONG_TERM_STALLED_PROGRESS":
-        feedback_classes.add(FeedbackClass.ERROR_FLAGGING)
+    # # Long-term stalled progress -> Help out -> c.i
+    # if cognition == "LONG_TERM_STALLED_PROGRESS":
+    #     feedback_classes.add(FeedbackClass.ERROR_FLAGGING)
+    #
+    # # Development increases progress -> Reflection/Rehearsal -> c.viii
+    # if cognition == "DEVELOPMENT_INCREASES_PROGRESS":
+    #     feedback_classes.add(FeedbackClass.ELABORATE)
+    #
+    # # Development for static progress -> Motivate to keep persisting -> b.ii
+    # if cognition == "DEVELOPMENT_STATIC_PROGRESS":
+    #     feedback_classes.add(FeedbackClass.REASSURE)
+    #
+    # # Development decreases progress -> Corrective explanation -> c.iii
+    # if cognition == "DEVELOPMENT_DECREASES_PROGRESS":
+    #     feedback_classes.add(FeedbackClass.INFORM)
+    #
+    # # Trial & Error -> a.ii
+    # if cognition == "TRIAL_AND_ERROR":
+    #     feedback_classes.add(FeedbackClass.PARTIAL_CORRECTNESS)
+    #     
+    #     # -> b.i
+    #     if persistence == "EXPECTED_COMPLETION":
+    #         feedback_classes.add(FeedbackClass.EVIDENCE_BASED_PRAISE)
+    #
+    #     # -> b.ii
+    #     if persistence == "HIGH_PERSISTER":
+    #         feedback_classes.add(FeedbackClass.REASSURE)
+    #
+    #     # -> c.ii
+    #     if persistence == "EARLY_QUITTER":
+    #         feedback_classes.add(FeedbackClass.HOW_TO)
+    #
+    # # Code abandonment
+    # if cognition == "CODE_ABANDONMENT":
+    #
+    #     # -> c.v
+    #     if persistence in {"EXPECTED_COMPLETION", "EARLY_QUITTER"}:
+    #         feedback_classes.add(FeedbackClass.DIAGNOSE)
+    #
+    #     # TO DO: always reassure, first two times elaborate, after fill in the blank
+    #     # -> b.ii, c.vii, c.viii
+    #     if persistence == "HIGH_PERSISTER":
+    #         feedback_classes.update({
+    #             FeedbackClass.REASSURE,
+    #             # FeedbackClass.FILL_IN_THE_BLANK,
+    #             FeedbackClass.ELABORATE,
+    #         })
+    #
+    # # Step-by-step elimination -> c.iv
+    # if cognition == "STEP_BY_STEP_ELIMINATION":
+    #     feedback_classes.add(FeedbackClass.NUDGE)
+    #
+    # # Snap'n test -> c.ii
+    # if cognition == "SNAP_N_TEST":
+    #     feedback_classes.add(FeedbackClass.INFORM)
 
-    # Development increases progress -> Reflection/Rehearsal -> c.viii
-    if cognition == "DEVELOPMENT_INCREASES_PROGRESS":
-        feedback_classes.add(FeedbackClass.ELABORATE)
-
-    # Development for static progress -> Motivate to keep persisting -> b.ii
-    if cognition == "DEVELOPMENT_STATIC_PROGRESS":
-        feedback_classes.add(FeedbackClass.REASSURE)
-
-    # Development decreases progress -> Corrective explanation -> c.iii
-    if cognition == "DEVELOPMENT_DECREASES_PROGRESS":
-        feedback_classes.add(FeedbackClass.INFORM)
-
-    # Trial & Error -> a.ii
-    if cognition == "TRIAL_AND_ERROR":
-        feedback_classes.add(FeedbackClass.PARTIAL_CORRECTNESS)
-        
-        # -> b.i
-        if persistence == "EXPECTED_COMPLETION":
+    # Decide feedback based on persistence category and attempts
+    if persistence == "EXPECTED_COMPLETION":
+        if attempts <= 2:
             feedback_classes.add(FeedbackClass.EVIDENCE_BASED_PRAISE)
-
-        # -> b.ii
-        if persistence == "HIGH_PERSISTER":
-            feedback_classes.add(FeedbackClass.REASSURE)
-
-        # -> c.ii
-        if persistence == "EARLY_QUITTER":
-            feedback_classes.add(FeedbackClass.HOW_TO)
-
-    # Code abandonment
-    if cognition == "CODE_ABANDONMENT":
-
-        # -> c.v
-        if persistence in {"EXPECTED_COMPLETION", "EARLY_QUITTER"}:
+        else:
             feedback_classes.add(FeedbackClass.DIAGNOSE)
-
-        # TO DO: always reassure, first two times elaborate, after fill in the blank
-        # -> b.ii, c.vii, c.viii
-        if persistence == "HIGH_PERSISTER":
-            feedback_classes.update({
-                FeedbackClass.REASSURE,
-                # FeedbackClass.FILL_IN_THE_BLANK,
-                FeedbackClass.ELABORATE,
-            })
-
-    # Step-by-step elimination -> c.iv
-    if cognition == "STEP_BY_STEP_ELIMINATION":
-        feedback_classes.add(FeedbackClass.NUDGE)
-
-    # Snap'n test -> c.ii
-    if cognition == "SNAP_N_TEST":
-        feedback_classes.add(FeedbackClass.INFORM)
+    elif persistence == "HIGH_PERSISTER":
+        if attempts <= 2:
+            feedback_classes.add(FeedbackClass.REASSURE)
+        else:
+            feedback_classes.add(FeedbackClass.ELABORATE)
+    else:  # EARLY_QUITTER, IN_PROGRESS, or default
+        if attempts <= 2:
+            feedback_classes.add(FeedbackClass.DIAGNOSE)
+        else:
+            feedback_classes.add(FeedbackClass.HOW_TO)
 
     return feedback_classes

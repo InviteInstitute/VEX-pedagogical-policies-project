@@ -1,0 +1,6 @@
+BEGIN;
+
+ALTER TABLE chat.messages
+    ADD COLUMN IF NOT EXISTS playground TEXT;
+
+COMMIT;

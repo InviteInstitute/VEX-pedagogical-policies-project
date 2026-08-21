@@ -92,8 +92,6 @@ class EventRecord:
     block_event_data_json: dict[str, Any] | None
     playground_data_json: dict[str, Any] | None
     error_message: str | None
-
-
 @dataclass(frozen=True)
 class CurrentStateSnapshot:
     session_id: str
@@ -108,6 +106,7 @@ class CurrentStateSnapshot:
     computed_from_event_id_min: int | None
     computed_from_event_id_max: int | None
     created_at: str
+    stage: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -115,6 +114,7 @@ class CurrentStateSnapshot:
         payload["direction"] = self.direction.value
         payload["cognition"] = self.cognition.value
         payload["persistence"] = self.persistence.value
+        payload["stage"] = self.stage
         return payload
 
 
@@ -276,6 +276,20 @@ def select_current_playground_segment(events: list[EventRecord]) -> tuple[str, l
     if not segment:
         raise ValueError("Could not isolate a current playground segment for analysis.")
     return current_playground, segment
+
+
+def extract_current_stage(events: list[EventRecord]) -> int | None:
+    for event in reversed(events):
+        if event.playground_data_json and isinstance(event.playground_data_json, dict):
+            parameters = event.playground_data_json.get("parameters")
+            if isinstance(parameters, dict):
+                stage = parameters.get("stage")
+                if stage is not None:
+                    try:
+                        return int(stage)
+                    except (ValueError, TypeError):
+                        pass
+    return None
 
 
 def extract_playground_parameters(playground_data_json: dict[str, Any] | None) -> dict[str, Any]:
@@ -509,6 +523,7 @@ def analyze_current_state(events: list[EventRecord]) -> CurrentStateSnapshot:
         direction,
     )
     persistence = classify_persistence(time_on_task_s, action_level, progress_pct, direction)
+    stage = extract_current_stage(segment)
 
     event_ids = [event.id for event in segment if event.id is not None]
     return CurrentStateSnapshot(
@@ -524,6 +539,7 @@ def analyze_current_state(events: list[EventRecord]) -> CurrentStateSnapshot:
         computed_from_event_id_min=min(event_ids) if event_ids else None,
         computed_from_event_id_max=max(event_ids) if event_ids else None,
         created_at=datetime.now(timezone.utc).isoformat(),
+        stage=stage,
     )
 
 
@@ -542,7 +558,8 @@ def upsert_snapshot(snapshot: CurrentStateSnapshot) -> None:
         persistence,
         computed_from_event_id_min,
         computed_from_event_id_max,
-        created_at
+        created_at,
+        stage
     )
     VALUES (
         %(session_id)s,
@@ -555,7 +572,8 @@ def upsert_snapshot(snapshot: CurrentStateSnapshot) -> None:
         %(persistence)s,
         %(computed_from_event_id_min)s,
         %(computed_from_event_id_max)s,
-        %(created_at)s
+        %(created_at)s,
+        %(stage)s
     )
     ON CONFLICT (session_id, student_id)
     DO UPDATE SET
@@ -567,7 +585,8 @@ def upsert_snapshot(snapshot: CurrentStateSnapshot) -> None:
         persistence = EXCLUDED.persistence,
         computed_from_event_id_min = EXCLUDED.computed_from_event_id_min,
         computed_from_event_id_max = EXCLUDED.computed_from_event_id_max,
-        created_at = EXCLUDED.created_at
+        created_at = EXCLUDED.created_at,
+        stage = EXCLUDED.stage
     """
     payload = snapshot.to_dict()
     with get_conn() as conn:

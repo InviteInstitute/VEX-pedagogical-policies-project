@@ -19,20 +19,22 @@ SENTENCE_SPLIT_PATTERN = re.compile(r"(?<=[.!?])\s+")
 
 
 def prepare_main_llm_request(
-    task: str,
+    current_stage: str,
     student_message: str,
     available_blocks: list[str] | None,
     robot_behavior_summary: str,
     recent_messages: list[dict[str, str]],
     feedback_classes: set[FeedbackClass],
+    background_info: str,
 ) -> dict[str, str]:
     prompt = build_feedback_prompt_from_classes(
-        task=task,
+        current_stage=current_stage,
         student_message=student_message,
         available_blocks=available_blocks,
         robot_behavior_summary=robot_behavior_summary,
         recent_messages=recent_messages,
         feedback_classes=feedback_classes,
+        background_info=background_info,
     )
     return {
         "model": get_navigator_model(),
@@ -106,10 +108,11 @@ def enforce_student_response_length(response_text: str) -> str:
     return trimmed_text
 
 
-def generate_robot_behavior_summary(task: str, raw_logs: str) -> dict[str, str]:
+def generate_robot_behavior_summary(background_info: str, current_stage: str, raw_logs: str) -> dict[str, str]:
     model = get_navigator_model()
     prompt = build_robot_behavior_prompt(
-        task=task,
+        background_info=background_info,
+        current_stage=current_stage,
         raw_logs=raw_logs,
     )
     response_text = execute_prompt(model=model, prompt=prompt)
@@ -121,20 +124,22 @@ def generate_robot_behavior_summary(task: str, raw_logs: str) -> dict[str, str]:
 
 
 def generate_main_llm_response(
-    task: str,
+    current_stage: str,
     student_message: str,
     available_blocks: list[str] | None,
     robot_behavior_summary: str,
     recent_messages: list[dict[str, str]],
     feedback_classes: set[FeedbackClass],
+    background_info: str,
 ) -> dict[str, str]:
     llm_request = prepare_main_llm_request(
-        task=task,
+        current_stage=current_stage,
         student_message=student_message,
         available_blocks=available_blocks,
         robot_behavior_summary=robot_behavior_summary,
         recent_messages=recent_messages,
         feedback_classes=feedback_classes,
+        background_info=background_info,
     )
     response_text = execute_prompt(
         model=llm_request["model"],
@@ -144,5 +149,36 @@ def generate_main_llm_response(
     return {
         "model": llm_request["model"],
         "prompt": llm_request["prompt"],
+        "response_text": response_text,
+    }
+
+
+def generate_no_runs_llm_response(
+    current_stage: str,
+    student_message: str,
+    available_blocks: list[str] | None,
+    recent_messages: list[dict[str, str]],
+    background_info: str,
+    no_runs_message: str,
+) -> dict[str, str]:
+    from src.context_builder import build_no_runs_feedback_prompt
+
+    prompt = build_no_runs_feedback_prompt(
+        current_stage=current_stage,
+        student_message=student_message,
+        available_blocks=available_blocks,
+        recent_messages=recent_messages,
+        background_info=background_info,
+        no_runs_message=no_runs_message,
+    )
+    model = get_navigator_model()
+    response_text = execute_prompt(
+        model=model,
+        prompt=prompt,
+    )
+    response_text = enforce_student_response_length(response_text)
+    return {
+        "model": model,
+        "prompt": prompt,
         "response_text": response_text,
     }

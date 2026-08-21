@@ -19,8 +19,10 @@ def insert_message(
     student_id: str,
     role: str,
     message_text: str,
+    playground: str | None = None,
     feedback_class: str | None = None,
     response_id: UUID | None = None,
+    stage: int | None = None,
 ) -> None:
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -31,18 +33,22 @@ def insert_message(
                     student_id,
                     role,
                     message_text,
+                    playground,
                     feedback_class,
-                    response_id
+                    response_id,
+                    stage
                 )
-                VALUES (%s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     session_id,
                     student_id,
                     role,
                     message_text,
+                    playground,
                     feedback_class,
                     response_id,
+                    stage,
                 ),
             )
 

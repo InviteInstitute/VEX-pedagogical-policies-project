@@ -255,51 +255,71 @@ OUTPUT RULES
 
 PROMPT_TEMPLATE = """You are an educational feedback assistant for VEXcode VR, a block-based programming tool for middle school students.
 
+
 Your job is to write one short feedback message for the student.
+
 
 INPUTS
 
-Task:
-{task}
+
+Background info:
+{background_info}
+
+
+Current stage:
+{current_stage}
+
 
 Available blocks:
 {available_blocks}
 
+
 Student message:
 {student_message}
+
 
 Robot behavior summary from the raw logs:
 {robot_behavior_summary}
 
+
 Recent chat in this session:
 {recent_chat}
+
 
 Feedback types to use:
 {feedback_types}
 
+
 Feedback type descriptions:
 {descriptions}
+
 
 Examples of each feedback type:
 {examples}
 
+
 Extra notes:
 {extra_notes}
 
+
 INSTRUCTIONS
+
 
 Use these sources in this priority order:
 1. Student message
 2. Robot behavior summary from the raw logs
 3. Recent chat
-4. Task
-5. Feedback type descriptions/examples/notes
+4. Background info
+5. Current stage description
+6. Feedback type descriptions/examples/notes
+
 
 Before writing feedback:
-- Use the robot behavior summary to understand what the robot is doing.
+- Use the robot behavior summary to understand what the robot is doing. 
 - Only mention a block if the logs give enough evidence that it is currently on the workspace.
 - If the logs do not clearly show a current block, do not guess or mention one.
 - Do not invent actions, errors, goals, or progress that are not supported by the inputs.
+
 
 How to write the feedback:
 - Write for a middle school student.
@@ -311,6 +331,7 @@ How to write the feedback:
 - If the feedback types pull in different directions, blend them naturally into one message instead of forcing separate ideas.
 - Prefer the most immediately useful next step for the student.
 
+
 Behavior rules:
 - Do not give an overall evaluation or grade.
 - Do not discourage the student or threaten self-esteem.
@@ -319,9 +340,11 @@ Behavior rules:
 - If the student's input is unclear or vague, ask them to restate their question clearly.
 - In extreme cases of long-term struggle or no progress, tell the student to ask their teacher for help.
 
+
 Block reference rule:
 - When referring to a specific block, wrap only the exact block name in backticks.
 - Preserve the exact capitalization and wording from the Available blocks list.
+
 
 OUTPUT RULES
 - Output only the feedback message.
@@ -332,20 +355,79 @@ OUTPUT RULES
 - Never exceed 22 words.
 """
 
+
+NO_RUNS_PROMPT_TEMPLATE = """You are an educational feedback assistant for VEXcode VR, a block-based programming tool for middle school students.
+
+
+The student is asking for help, but they have not run their code yet.
+
+
+INPUTS
+
+
+Background info:
+{background_info}
+
+
+Current stage:
+{current_stage}
+
+
+Available blocks:
+{available_blocks}
+
+
+Student message:
+{student_message}
+
+
+Recent chat in this session:
+{recent_chat}
+
+
+Default Message:
+{no_runs_message}
+
+
+INSTRUCTIONS
+- The student has NOT run their code yet, so we cannot see their robot's behavior.
+- Write a helpful guidance message that answers their question based on the Background info to help them get started.
+- If the student message is about their code you MUST incorporate the default message: "{no_runs_message}" (or a close variation of it, e.g. "Please run your code once first to get help...") into your response so they know they need to run the code first to get better feedback. If the question is about the environment answer based on the given context. If you do not have enough context to answer, respond with the "{no_runs_message}" message.
+- Use simple, direct, natural language for a middle school student.
+- Keep the feedback extremely concise.
+
+
+OUTPUT RULES
+- Output only the feedback message.
+- Do not include labels, explanations, bullet points, or quotation marks.
+- Keep it to exactly 1 short sentence.
+- Aim for about 10-18 words when possible.
+- Never exceed 22 words.
+"""
+
+
 ROBOT_BEHAVIOR_PROMPT_TEMPLATE = """You are an expert in VEXcode VR. I will give you log data. ONLY tell me what the robot does.
+
+Background info:
+{background_info}
+
+Current stage:
+{current_stage}
 
 Raw logs for this student and session:
 {raw_logs}
 """
 
+
 def build_feedback_prompt(
-    task: str,
+    current_stage: str,
     student_message: str,
     available_blocks: str,
     robot_behavior_summary: str,
     recent_chat: str,
     feedback_types: list[str],
     feedback_specs: dict,
+    background_info: str,
 ) -> str:
     feedback_types_text = "\n".join(f"- {t}" for t in feedback_types)
 
@@ -365,7 +447,7 @@ def build_feedback_prompt(
     )
 
     return PROMPT_TEMPLATE.format(
-        task=task,
+        current_stage=current_stage,
         student_message=student_message,
         available_blocks=available_blocks,
         robot_behavior_summary=robot_behavior_summary,
@@ -374,16 +456,18 @@ def build_feedback_prompt(
         descriptions=descriptions_text,
         examples=examples_text,
         extra_notes=extra_notes_text,
+        background_info=background_info,
     )
 
 
 def build_feedback_prompt_from_classes(
-    task: str,
+    current_stage: str,
     student_message: str,
     available_blocks: list[str] | None,
     robot_behavior_summary: str,
     recent_messages: list[dict[str, str]],
     feedback_classes: set[FeedbackClass],
+    background_info: str,
 ) -> str:
     feedback_types = []
     for feedback_class in feedback_classes:
@@ -403,17 +487,49 @@ def build_feedback_prompt_from_classes(
         available_blocks_text = "None provided"
 
     return build_feedback_prompt(
-        task=task,
+        current_stage=current_stage,
         student_message=student_message,
         available_blocks=available_blocks_text,
         robot_behavior_summary=robot_behavior_summary,
         recent_chat=recent_chat,
         feedback_types=feedback_types,
         feedback_specs=FEEDBACK_SPECS,
+        background_info=background_info,
     )
 
 
-def build_robot_behavior_prompt(task: str, raw_logs: str) -> str:
+def build_no_runs_feedback_prompt(
+    current_stage: str,
+    student_message: str,
+    available_blocks: list[str] | None,
+    recent_messages: list[dict[str, str]],
+    background_info: str,
+    no_runs_message: str,
+) -> str:
+    recent_chat = "\n".join(
+        f"{message['role'].capitalize()}: {message['content']}"
+        for message in recent_messages
+    )
+    if not recent_chat:
+        recent_chat = "None"
+
+    available_blocks_text = "\n".join(f"- {block}" for block in available_blocks or [])
+    if not available_blocks_text:
+        available_blocks_text = "None provided"
+
+    return NO_RUNS_PROMPT_TEMPLATE.format(
+        current_stage=current_stage,
+        student_message=student_message,
+        available_blocks=available_blocks_text,
+        recent_chat=recent_chat,
+        background_info=background_info,
+        no_runs_message=no_runs_message,
+    )
+
+
+def build_robot_behavior_prompt(background_info: str, current_stage: str, raw_logs: str) -> str:
     return ROBOT_BEHAVIOR_PROMPT_TEMPLATE.format(
+        background_info=background_info,
+        current_stage=current_stage,
         raw_logs=raw_logs,
     )

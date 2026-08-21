@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS chat.messages (
     student_id TEXT NOT NULL,
     role TEXT NOT NULL,
     message_text TEXT NOT NULL,
+    playground TEXT,
     feedback_class TEXT,
     response_id UUID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
